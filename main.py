@@ -35,14 +35,14 @@ from telegram.error import TelegramError, BadRequest, Forbidden, RetryAfter
 # CONFIGURATION
 # ============================================================
 
-BOT_TOKEN = os.getenv("8998476657:AAFlqY444CFw5IsVCoAgavHajLasZsRkX_c", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("8998476657:AAFlqY444CFw5IsVCoAgavHajLasZsRkX_c", "8998476657:AAFlqY444CFw5IsVCoAgavHajLasZsRkX_c")
 
 OWNER_ID = 6975146118
 GROUP_ID = -1003535011408
 SERVER_MEDIA_DIR = "./media"
 DATABASE_FILE = "./media_manager.db"
 TEMP_DIR = "./temp"
-CHANNEL_USERNAME = "@your_channel_here"
+CHANNEL_USERNAME = "https://t.me/+UvkuWW91FsdhNDQy"
 
 DELETE_SOURCE_AFTER_COPY = False
 
