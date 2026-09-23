@@ -895,14 +895,47 @@ def build_application() -> Application:
     return application
 
 
-def main():
+async def main():
     validate_config()
     init_database()
 
     application = build_application()
+
+    logger.info("Bot initializing...")
+
+    await application.initialize()
+
     logger.info("Bot starting polling...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    await application.start()
+
+    if application.updater is None:
+        raise RuntimeError("Telegram updater mavjud emas.")
+
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
+
+    try:
+        # Botni ishlashda ushlab turamiz.
+        await asyncio.Event().wait()
+
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutdown requested.")
+
+    finally:
+        logger.info("Stopping polling...")
+
+        if application.updater.running:
+            await application.updater.stop()
+
+        if application.running:
+            await application.stop()
+
+        await application.shutdown()
+
+        logger.info("Bot stopped successfully.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
