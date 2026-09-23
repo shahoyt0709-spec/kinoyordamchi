@@ -1,59 +1,81 @@
-# -*- coding: utf-8 -*-
+# ============================================================
+# 🎬 KINO YORDAMCHI BOT
+# Python 3.13/3.14
+# python-telegram-bot 21.1.1
+# Render + Polling + aiohttp health server
+# ============================================================
 
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
-# =========================================================
-# CONFIG
-# =========================================================
+
+# ============================================================
+# ⚙️ CONFIG
+# ============================================================
 
 BOT_TOKEN = os.getenv("8998476657:AAFlqY444CFw5IsVCoAgavHajLasZsRkX_c", "").strip()
-OWNER_ID = int(os.getenv("6975146118", "0"))
-GROUP_ID = int(os.getenv("-1003535011408", "0"))
+
+try:
+    OWNER_ID = int(os.getenv("6975146118", "0"))
+except ValueError:
+    OWNER_ID = 0
+
+try:
+    GROUP_ID = int(os.getenv("-1003535011408", "0"))
+except ValueError:
+    GROUP_ID = 0
+
 PORT = int(os.getenv("PORT", "10000"))
 
-DB_PATH = os.getenv("DB_PATH", "movies.db")
+DB_PATH = os.getenv("DB_PATH", "kino_bot.db")
+
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "media"))
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 MIN_WIDTH = 1920
 MIN_HEIGHT = 1080
 
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-
-# =========================================================
-# LOGGING
-# =========================================================
+BOT_NAME = "🎬 Kino Yordamchi"
 
 logging.basicConfig(
-    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
 )
 
 logger = logging.getLogger("KinoYordamchi")
 
-# =========================================================
-# DATABASE
-# =========================================================
+
+# ============================================================
+# 🗄 DATABASE
+# ============================================================
 
 db = sqlite3.connect(
     DB_PATH,
@@ -67,8 +89,9 @@ db.execute("PRAGMA foreign_keys=ON")
 
 
 def init_database():
-    db.executescript(
-        """
+    cursor = db.cursor()
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS movies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -76,231 +99,140 @@ def init_database():
             quality TEXT,
             audio TEXT,
             video_codec TEXT,
-            format TEXT,
-            filename TEXT,
-            file_unique_id TEXT,
+            container TEXT,
+            file_name TEXT,
             file_id TEXT,
+            file_unique_id TEXT,
             sha256 TEXT,
             topic_id INTEGER,
-            telegram_message_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS series (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             year INTEGER,
             topic_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(title, year)
-        );
+        )
+    """)
 
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS seasons (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             series_id INTEGER NOT NULL,
-            season_number INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(series_id, season_number),
+            season INTEGER NOT NULL,
+            UNIQUE(series_id, season),
             FOREIGN KEY(series_id)
                 REFERENCES series(id)
                 ON DELETE CASCADE
-        );
+        )
+    """)
 
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS episodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             series_id INTEGER NOT NULL,
-            season_number INTEGER NOT NULL,
-            episode_number INTEGER NOT NULL,
+            season INTEGER NOT NULL,
+            episode INTEGER NOT NULL,
             episode_title TEXT,
             quality TEXT,
             audio TEXT,
             video_codec TEXT,
-            format TEXT,
-            filename TEXT,
-            file_unique_id TEXT,
+            container TEXT,
+            file_name TEXT,
             file_id TEXT,
+            file_unique_id TEXT,
             sha256 TEXT,
             topic_id INTEGER,
-            telegram_message_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(series_id, season_number, episode_number),
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(series_id, season, episode),
             FOREIGN KEY(series_id)
                 REFERENCES series(id)
                 ON DELETE CASCADE
-        );
+        )
+    """)
 
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS topics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content_type TEXT NOT NULL,
-            entity_id INTEGER NOT NULL,
+            content_id INTEGER NOT NULL,
             topic_id INTEGER NOT NULL,
             title TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(content_type, entity_id)
-        );
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(content_type, content_id)
+        )
+    """)
 
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS metadata (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sha256 TEXT UNIQUE,
-            filename TEXT,
-            width INTEGER,
-            height INTEGER,
-            duration REAL,
-            video_codec TEXT,
-            audio_codec TEXT,
-            format TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+            file_name TEXT,
+            data TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
-        );
-        """
-    )
+        )
+    """)
 
     db.commit()
 
-    logger.info("SQLite database initialized successfully.")
+    logger.info("SQLite database initialized.")
 
 
-# =========================================================
-# CONFIG VALIDATION
-# =========================================================
+# ============================================================
+# 🔐 OWNER CHECK
+# ============================================================
 
-def validate_config():
-
-    if not BOT_TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN Environment Variable topilmadi."
-        )
-
-    if OWNER_ID == 0:
-        raise RuntimeError(
-            "OWNER_ID Environment Variable noto'g'ri."
-        )
-
-    if GROUP_ID == 0:
-        raise RuntimeError(
-            "GROUP_ID Environment Variable noto'g'ri."
-        )
+def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID
 
 
-# =========================================================
-# OWNER CHECK
-# =========================================================
-
-def is_owner(update: Update) -> bool:
-
+async def owner_only(update: Update) -> bool:
     user = update.effective_user
 
     if not user:
         return False
 
-    return user.id == OWNER_ID
-
-
-async def owner_only(update: Update) -> bool:
-
-    if is_owner(update):
+    if is_owner(user.id):
         return True
 
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "❌ Sizda ushbu botdan foydalanish huquqi yo'q."
+    if update.callback_query:
+        await update.callback_query.answer(
+            "⛔ Sizda ruxsat yo‘q!",
+            show_alert=True,
+        )
+
+    elif update.message:
+        await update.message.reply_text(
+            "⛔ <b>Ruxsat yo‘q!</b>\n\n"
+            "Bu bot faqat administrator uchun.",
+            parse_mode=ParseMode.HTML,
         )
 
     return False
 
 
-# =========================================================
-# FILENAME PARSER
-# =========================================================
+# ============================================================
+# 🎬 FILENAME PARSER
+# ============================================================
 
-def clean_title(text: str) -> str:
+def parse_filename(filename: str) -> dict:
+    original = Path(filename).name
 
-    text = re.sub(
-        r"\[[^\]]+\]",
-        " ",
-        text,
-    )
-
-    text = re.sub(
-        r"\([^)]*(?:19|20)\d{2}[^)]*\)",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b(?:S\d{1,2}E\d{1,3})\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b\d{1,2}x\d{1,3}\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b(?:2160p|1440p|1080p|720p|480p)\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b(?:WEB[-_. ]?DL|WEB[-_. ]?RIP|BLURAY|BLU[-_. ]?RAY|BDRIP|DVDRIP|HDTV)\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b(?:x264|x265|h264|h265|HEVC|AVC|AV1)\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b(?:AAC|AC3|EAC3|DTS|TRUEHD|ATMOS|DDP\d?\.\d)\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"\b(?:MKV|MP4|AVI|MOV)\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"[._]+",
-        " ",
-        text,
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    ).strip()
-
-    return text
-
-
-def parse_filename(filename: str):
-
-    original = Path(filename).stem
+    stem = Path(original).stem
 
     result = {
+        "original": original,
         "title": None,
         "year": None,
         "season": None,
@@ -309,207 +241,218 @@ def parse_filename(filename: str):
         "quality": None,
         "audio": None,
         "video_codec": None,
-        "format": Path(filename).suffix.lower().replace(".", ""),
+        "container": Path(original).suffix.replace(".", "").upper(),
+        "type": "movie",
     }
 
-    # -----------------------------------------------------
-    # SEASON / EPISODE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Season/Episode
+    # --------------------------------------------------------
 
-    match = re.search(
-        r"\bS(\d{1,2})E(\d{1,3})\b",
-        original,
-        re.I,
+    season_episode = re.search(
+        r"[Ss](\d{1,2})[Ee](\d{1,3})",
+        stem,
     )
 
-    if not match:
-
-        match = re.search(
-            r"\b(\d{1,2})x(\d{1,3})\b",
-            original,
-            re.I,
+    if not season_episode:
+        season_episode = re.search(
+            r"(\d{1,2})[xX](\d{1,3})",
+            stem,
         )
 
-    if match:
+    if season_episode:
+        result["type"] = "series"
+        result["season"] = int(season_episode.group(1))
+        result["episode"] = int(season_episode.group(2))
 
-        result["season"] = int(match.group(1))
-        result["episode"] = int(match.group(2))
-
-    # -----------------------------------------------------
-    # YEAR
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Year
+    # --------------------------------------------------------
 
     year_match = re.search(
-        r"\b((?:19|20)\d{2})\b",
-        original,
+        r"(19\d{2}|20\d{2})",
+        stem,
     )
 
     if year_match:
         result["year"] = int(year_match.group(1))
 
-    # -----------------------------------------------------
-    # QUALITY
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Quality
+    # --------------------------------------------------------
 
     quality_patterns = [
-        r"\b2160p\b",
-        r"\b1440p\b",
-        r"\b1080p\b",
-        r"\b720p\b",
-        r"\b480p\b",
+        r"2160p",
+        r"1440p",
+        r"1080p",
+        r"720p",
+        r"480p",
+        r"4K",
+        r"8K",
     ]
 
     for pattern in quality_patterns:
-
-        match = re.search(
-            pattern,
-            original,
-            re.I,
-        )
+        match = re.search(pattern, stem, re.I)
 
         if match:
-            result["quality"] = match.group(0).lower()
+            result["quality"] = match.group(0).upper()
             break
 
-    # -----------------------------------------------------
-    # AUDIO
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Audio
+    # --------------------------------------------------------
 
     audio_patterns = [
-        r"\bTRUEHD\b",
-        r"\bATMOS\b",
-        r"\bEAC3\b",
-        r"\bDDP\d?\.\d\b",
-        r"\bAC3\b",
-        r"\bDTS\b",
-        r"\bAAC\b",
+        "TRUEHD",
+        "ATMOS",
+        "DTS-HD",
+        "DTS",
+        "DDP",
+        "DD+",
+        "AC3",
+        "AAC",
+        "FLAC",
+        "MP3",
+        "EAC3",
     ]
 
-    for pattern in audio_patterns:
+    upper_stem = stem.upper()
 
-        match = re.search(
-            pattern,
-            original,
-            re.I,
-        )
-
-        if match:
-            result["audio"] = match.group(0).upper()
+    for audio in audio_patterns:
+        if audio in upper_stem:
+            result["audio"] = audio
             break
 
-    # -----------------------------------------------------
-    # VIDEO CODEC
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Video codec
+    # --------------------------------------------------------
 
     codec_patterns = [
-        r"\bH\.?265\b",
-        r"\bX265\b",
-        r"\bHEVC\b",
-        r"\bH\.?264\b",
-        r"\bX264\b",
-        r"\bAVC\b",
-        r"\bAV1\b",
+        ("H.265", ["H265", "X265", "HEVC"]),
+        ("H.264", ["H264", "X264", "AVC"]),
+        ("AV1", ["AV1"]),
+        ("VP9", ["VP9"]),
     ]
 
-    for pattern in codec_patterns:
-
-        match = re.search(
-            pattern,
-            original,
-            re.I,
-        )
-
-        if match:
-
-            codec = match.group(0).upper()
-
-            if codec in ("X265", "H265"):
-                codec = "HEVC"
-
-            if codec in ("X264", "H264"):
-                codec = "AVC"
-
-            result["video_codec"] = codec
-
+    for codec_name, patterns in codec_patterns:
+        if any(x in upper_stem for x in patterns):
+            result["video_codec"] = codec_name
             break
 
-    # -----------------------------------------------------
-    # TITLE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Clean title
+    # --------------------------------------------------------
 
-    title = original
+    title = stem
 
-    if result["year"]:
+    title = re.sub(
+        r"\b(19\d{2}|20\d{2})\b",
+        "",
+        title,
+    )
+
+    title = re.sub(
+        r"[Ss]\d{1,2}[Ee]\d{1,3}",
+        "",
+        title,
+        flags=re.I,
+    )
+
+    title = re.sub(
+        r"\d{1,2}[xX]\d{1,3}",
+        "",
+        title,
+    )
+
+    for pattern in quality_patterns:
         title = re.sub(
-            rf"\b{result['year']}\b",
-            " ",
-            title,
-        )
-
-    if result["season"] is not None:
-        title = re.sub(
-            r"\bS\d{1,2}E\d{1,3}\b",
-            " ",
+            pattern,
+            "",
             title,
             flags=re.I,
         )
 
+    for audio in audio_patterns:
         title = re.sub(
-            r"\b\d{1,2}x\d{1,3}\b",
-            " ",
+            re.escape(audio),
+            "",
             title,
             flags=re.I,
         )
 
-    title = clean_title(title)
+    title = re.sub(
+        r"\b(HEVC|H265|H264|X265|X264|AV1|WEB-DL|WEBRip|BluRay|BDRip|HDR|REMUX|10bit|8bit)\b",
+        "",
+        title,
+        flags=re.I,
+    )
 
-    result["title"] = title
+    title = title.replace(".", " ")
+    title = title.replace("_", " ")
+    title = title.replace("-", " ")
 
-    # -----------------------------------------------------
-    # EPISODE TITLE
-    # -----------------------------------------------------
+    title = re.sub(r"\s+", " ", title)
+    title = title.strip(" .-_")
 
-    if result["season"] is not None:
+    result["title"] = title or "Noma'lum"
 
-        episode_match = re.search(
-            r"(?:S\d{1,2}E\d{1,3}|\d{1,2}x\d{1,3})\s*[-._ ]+\s*(.+)",
-            original,
-            re.I,
+    # --------------------------------------------------------
+    # Episode title
+    # --------------------------------------------------------
+
+    if result["type"] == "series":
+        temp = re.sub(
+            r"[Ss]\d{1,2}[Ee]\d{1,3}",
+            "",
+            stem,
+            flags=re.I,
         )
 
-        if episode_match:
+        temp = re.sub(
+            r"\b(19\d{2}|20\d{2})\b",
+            "",
+            temp,
+        )
 
-            episode_title = clean_title(
-                episode_match.group(1)
-            )
+        temp = re.sub(
+            r"\b(2160p|1440p|1080p|720p|480p|4K|8K)\b",
+            "",
+            temp,
+            flags=re.I,
+        )
 
-            if episode_title:
-                result["episode_title"] = episode_title
+        temp = temp.replace(".", " ")
+        temp = temp.replace("_", " ")
+
+        parts = temp.split()
+
+        if parts:
+            # titledan keyingi qismni taxminiy episode title sifatida
+            cleaned = " ".join(parts).strip()
+
+            if cleaned.lower() != result["title"].lower():
+                result["episode_title"] = cleaned
 
     return result
 
 
-# =========================================================
-# FFMPEG / FFPROBE
-# =========================================================
+# ============================================================
+# 🔍 FFPROBE
+# ============================================================
 
-async def run_ffprobe(path: str):
-
+async def run_ffprobe(path: str) -> Optional[dict]:
     command = [
         "ffprobe",
         "-v",
-        "error",
-        "-show_entries",
-        "format=format_name,duration",
-        "-show_entries",
-        "stream=codec_type,codec_name,width,height",
-        "-of",
+        "quiet",
+        "-print_format",
         "json",
+        "-show_format",
+        "-show_streams",
         path,
     ]
 
     try:
-
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -519,115 +462,85 @@ async def run_ffprobe(path: str):
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-
             logger.error(
                 "ffprobe error: %s",
                 stderr.decode(errors="ignore"),
             )
-
             return None
 
-        import json
-
         return json.loads(
-            stdout.decode(
-                errors="ignore"
-            )
+            stdout.decode(errors="ignore")
         )
 
     except FileNotFoundError:
-
         logger.error(
-            "ffprobe topilmadi. FFmpeg o'rnatilganligini tekshiring."
+            "ffprobe topilmadi. Serverda FFmpeg o‘rnatilganini tekshiring."
         )
-
         return None
 
-    except Exception as exc:
-
-        logger.exception(
-            "ffprobe failed: %s",
-            exc,
-        )
-
+    except Exception as e:
+        logger.exception("ffprobe failed: %s", e)
         return None
 
 
-def extract_media_info(probe):
+def extract_video_metadata(data: dict) -> dict:
+    result = {
+        "width": 0,
+        "height": 0,
+        "duration": 0,
+        "video_codec": None,
+        "audio_codec": None,
+        "audio_language": None,
+        "container": None,
+    }
 
-    if not probe:
-        return {}
-
-    streams = probe.get(
-        "streams",
-        [],
-    )
-
-    format_info = probe.get(
-        "format",
-        {},
-    )
-
-    width = None
-    height = None
-    video_codec = None
-    audio_codec = None
+    streams = data.get("streams", [])
 
     for stream in streams:
+        codec_type = stream.get("codec_type")
 
-        codec_type = stream.get(
-            "codec_type"
-        )
+        if codec_type == "video" and not result["width"]:
+            result["width"] = int(
+                stream.get("width") or 0
+            )
 
-        if codec_type == "video":
+            result["height"] = int(
+                stream.get("height") or 0
+            )
 
-            width = stream.get("width")
-            height = stream.get("height")
-            video_codec = stream.get(
+            result["video_codec"] = stream.get(
                 "codec_name"
             )
 
-        elif codec_type == "audio":
-
-            audio_codec = stream.get(
+        elif codec_type == "audio" and not result["audio_codec"]:
+            result["audio_codec"] = stream.get(
                 "codec_name"
             )
 
-    duration = None
+            tags = stream.get("tags", {})
 
-    try:
-
-        duration = float(
-            format_info.get(
-                "duration"
+            result["audio_language"] = (
+                tags.get("language")
+                or tags.get("LANGUAGE")
             )
-        )
 
-    except Exception:
-        pass
+    fmt = data.get("format", {})
 
-    format_name = format_info.get(
+    result["duration"] = float(
+        fmt.get("duration") or 0
+    )
+
+    result["container"] = fmt.get(
         "format_name"
     )
 
-    return {
-        "width": width,
-        "height": height,
-        "duration": duration,
-        "video_codec": video_codec,
-        "audio_codec": audio_codec,
-        "format": format_name,
-    }
+    return result
 
 
-# =========================================================
-# QUALITY
-# =========================================================
-
-def detect_quality(width, height):
-
-    if not width or not height:
-        return "Unknown"
+def quality_from_resolution(
+    width: int,
+    height: int,
+) -> str:
 
     if width >= 3840 or height >= 2160:
         return "2160p 4K"
@@ -638,562 +551,184 @@ def detect_quality(width, height):
     if width >= 1920 or height >= 1080:
         return "1080p"
 
-    return f"{height}p"
+    if width >= 1280 or height >= 720:
+        return "720p"
 
+    return f"{width}x{height}"
 
-# =========================================================
-# SHA256
-# =========================================================
 
-def calculate_sha256(path: Path):
-
-    sha = hashlib.sha256()
-
-    with path.open(
-        "rb"
-    ) as file:
-
-        while True:
-
-            chunk = file.read(
-                1024 * 1024
-            )
-
-            if not chunk:
-                break
-
-            sha.update(chunk)
-
-    return sha.hexdigest()
-
-
-# =========================================================
-# DATABASE HELPERS
-# =========================================================
-
-def movie_exists(
-    file_unique_id=None,
-    sha256=None,
-):
-
-    query = """
-        SELECT *
-        FROM movies
-        WHERE file_unique_id = ?
-           OR sha256 = ?
-        LIMIT 1
-    """
-
-    row = db.execute(
-        query,
-        (
-            file_unique_id,
-            sha256,
-        ),
-    ).fetchone()
-
-    return row
-
-
-def episode_exists(
-    file_unique_id=None,
-    sha256=None,
-):
-
-    query = """
-        SELECT *
-        FROM episodes
-        WHERE file_unique_id = ?
-           OR sha256 = ?
-        LIMIT 1
-    """
-
-    row = db.execute(
-        query,
-        (
-            file_unique_id,
-            sha256,
-        ),
-    ).fetchone()
-
-    return row
-
-
-def get_series(
-    title,
-    year,
-):
-
-    return db.execute(
-        """
-        SELECT *
-        FROM series
-        WHERE title = ?
-          AND (
-              year = ?
-              OR (year IS NULL AND ? IS NULL)
-          )
-        LIMIT 1
-        """,
-        (
-            title,
-            year,
-            year,
-        ),
-    ).fetchone()
-
-
-def create_series(
-    title,
-    year,
-):
-
-    existing = get_series(
-        title,
-        year,
-    )
-
-    if existing:
-        return existing["id"]
-
-    cursor = db.execute(
-        """
-        INSERT INTO series (
-            title,
-            year
-        )
-        VALUES (?, ?)
-        """,
-        (
-            title,
-            year,
-        ),
-    )
-
-    db.commit()
-
-    return cursor.lastrowid
-
-
-def get_topic(
-    content_type,
-    entity_id,
-):
-
-    return db.execute(
-        """
-        SELECT *
-        FROM topics
-        WHERE content_type = ?
-          AND entity_id = ?
-        LIMIT 1
-        """,
-        (
-            content_type,
-            entity_id,
-        ),
-    ).fetchone()
-
-
-def save_topic(
-    content_type,
-    entity_id,
-    topic_id,
-    title,
-):
-
-    db.execute(
-        """
-        INSERT INTO topics (
-            content_type,
-            entity_id,
-            topic_id,
-            title
-        )
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(content_type, entity_id)
-        DO UPDATE SET
-            topic_id = excluded.topic_id,
-            title = excluded.title
-        """,
-        (
-            content_type,
-            entity_id,
-            topic_id,
-            title,
-        ),
-    )
-
-    db.commit()
-
-
-# =========================================================
-# FORUM TOPIC
-# =========================================================
-
-async def create_topic(
-    context,
-    title,
-):
-
-    topic = await context.bot.create_forum_topic(
-        chat_id=GROUP_ID,
-        name=title[:128],
-    )
-
-    return topic.message_thread_id
-
-
-async def get_or_create_movie_topic(
-    context,
-    movie_id,
-    title,
-    year,
-):
-
-    existing = get_topic(
-        "movie",
-        movie_id,
-    )
-
-    if existing:
-
-        return existing["topic_id"]
-
-    topic_title = title
-
-    if year:
-        topic_title += f" ({year})"
-
-    topic_id = await create_topic(
-        context,
-        topic_title,
-    )
-
-    save_topic(
-        "movie",
-        movie_id,
-        topic_id,
-        topic_title,
-    )
-
-    return topic_id
-
-
-async def get_or_create_series_topic(
-    context,
-    series_id,
-    title,
-    year,
-):
-
-    existing = get_topic(
-        "series",
-        series_id,
-    )
-
-    if existing:
-
-        return existing["topic_id"]
-
-    topic_title = f"📺 {title}"
-
-    if year:
-        topic_title += f" ({year})"
-
-    topic_id = await create_topic(
-        context,
-        topic_title,
-    )
-
-    save_topic(
-        "series",
-        series_id,
-        topic_id,
-        topic_title,
-    )
-
-    return topic_id
-
-
-# =========================================================
-# CAPTION GENERATOR
-# =========================================================
+# ============================================================
+# 📝 CAPTION GENERATOR
+# ============================================================
 
 def build_movie_caption(
-    info,
-    media,
-):
+    info: dict,
+    media: dict,
+) -> str:
 
     title = html.escape(
-        info["title"] or "Noma'lum"
+        info.get("title") or "Noma'lum"
     )
 
-    year = (
-        str(info["year"])
-        if info["year"]
-        else "Noma'lum"
+    year = info.get("year") or "—"
+
+    quality = quality_from_resolution(
+        media["width"],
+        media["height"],
     )
 
-    quality = html.escape(
-        media.get(
-            "quality"
-        ) or info.get(
-            "quality"
-        ) or "Noma'lum"
+    audio = (
+        info.get("audio")
+        or media.get("audio_codec")
+        or "—"
     )
 
-    audio = html.escape(
-        info.get(
-            "audio"
-        )
-        or media.get(
-            "audio_codec"
-        )
-        or "Noma'lum"
+    codec = (
+        info.get("video_codec")
+        or media.get("video_codec")
+        or "—"
     )
 
-    codec = html.escape(
-        info.get(
-            "video_codec"
-        )
-        or media.get(
-            "video_codec"
-        )
-        or "Noma'lum"
+    container = (
+        info.get("container")
+        or media.get("container")
+        or "—"
     )
-
-    fmt = html.escape(
-        info.get(
-            "format"
-        )
-        or "Noma'lum"
-    ).upper()
 
     return (
         f"🎬 <b>{title}</b>\n\n"
         f"📅 <b>Yil:</b> {year}\n"
         f"🎞 <b>Sifat:</b> {quality}\n"
-        f"🔊 <b>Audio:</b> {audio}\n"
-        f"🎥 <b>Video:</b> {codec}\n"
-        f"💿 <b>Format:</b> {fmt}\n\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🎬 <b>Kino Yordamchi</b>"
+        f"🔊 <b>Audio:</b> {html.escape(str(audio))}\n"
+        f"🎥 <b>Video:</b> {html.escape(str(codec))}\n"
+        f"💿 <b>Format:</b> {html.escape(str(container))}\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🍿 <b>{BOT_NAME}</b>\n"
+        f"━━━━━━━━━━━━━━━━"
     )
 
 
 def build_episode_caption(
-    info,
-    media,
-):
+    info: dict,
+    media: dict,
+) -> str:
 
     title = html.escape(
-        info["title"] or "Noma'lum"
+        info.get("title") or "Noma'lum"
     )
 
-    year = (
-        str(info["year"])
-        if info["year"]
-        else "Noma'lum"
+    season = info.get("season") or 1
+    episode = info.get("episode") or 1
+
+    episode_title = info.get(
+        "episode_title"
     )
 
-    season = info.get(
-        "season"
-    ) or 0
-
-    episode = info.get(
-        "episode"
-    ) or 0
-
-    episode_title = html.escape(
-        info.get(
-            "episode_title"
-        )
-        or "Noma'lum"
+    quality = quality_from_resolution(
+        media["width"],
+        media["height"],
     )
 
-    quality = html.escape(
-        media.get(
-            "quality"
-        ) or info.get(
-            "quality"
-        ) or "Noma'lum"
+    audio = (
+        info.get("audio")
+        or media.get("audio_codec")
+        or "—"
     )
 
-    audio = html.escape(
-        info.get(
-            "audio"
-        )
-        or media.get(
-            "audio_codec"
-        )
-        or "Noma'lum"
+    codec = (
+        info.get("video_codec")
+        or media.get("video_codec")
+        or "—"
     )
 
-    codec = html.escape(
-        info.get(
-            "video_codec"
-        )
-        or media.get(
-            "video_codec"
-        )
-        or "Noma'lum"
+    container = (
+        info.get("container")
+        or media.get("container")
+        or "—"
     )
 
-    fmt = html.escape(
-        info.get(
-            "format"
+    episode_line = ""
+
+    if episode_title:
+        episode_line = (
+            f"🎞 <b>Qism nomi:</b> "
+            f"{html.escape(episode_title)}\n"
         )
-        or "Noma'lum"
-    ).upper()
 
     return (
         f"📺 <b>{title}</b>\n\n"
-        f"📅 <b>Yil:</b> {year}\n"
-        f"🎞 <b>Fasl:</b> {season}\n"
+        f"📂 <b>Fasl:</b> {season}\n"
         f"🎬 <b>Qism:</b> {episode}\n"
-        f"📝 <b>Episode:</b> {episode_title}\n"
+        f"{episode_line}"
         f"🎞 <b>Sifat:</b> {quality}\n"
-        f"🔊 <b>Audio:</b> {audio}\n"
-        f"🎥 <b>Video:</b> {codec}\n"
-        f"💿 <b>Format:</b> {fmt}\n\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🎬 <b>Kino Yordamchi</b>"
+        f"🔊 <b>Audio:</b> {html.escape(str(audio))}\n"
+        f"🎥 <b>Video:</b> {html.escape(str(codec))}\n"
+        f"💿 <b>Format:</b> {html.escape(str(container))}\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🍿 <b>{BOT_NAME}</b>\n"
+        f"━━━━━━━━━━━━━━━━"
     )
 
 
-# =========================================================
-# SAVE MOVIE
-# =========================================================
+# ============================================================
+# 🎛 INLINE MENU
+# ============================================================
 
-def save_movie(
-    info,
-    media,
-    filename,
-    file_unique_id,
-    file_id,
-    sha256,
-    topic_id,
-    message_id,
-):
+def main_keyboard() -> InlineKeyboardMarkup:
 
-    db.execute(
-        """
-        INSERT INTO movies (
-            title,
-            year,
-            quality,
-            audio,
-            video_codec,
-            format,
-            filename,
-            file_unique_id,
-            file_id,
-            sha256,
-            topic_id,
-            telegram_message_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            info["title"],
-            info["year"],
-            media.get("quality"),
-            info.get("audio")
-            or media.get("audio_codec"),
-            info.get("video_codec")
-            or media.get("video_codec"),
-            info.get("format"),
-            filename,
-            file_unique_id,
-            file_id,
-            sha256,
-            topic_id,
-            message_id,
-        ),
-    )
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🎬 Kinolar",
+                callback_data="movies",
+            ),
+            InlineKeyboardButton(
+                "📺 Seriallar",
+                callback_data="series",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 Statistika",
+                callback_data="status",
+            ),
+            InlineKeyboardButton(
+                "⚙️ Sozlamalar",
+                callback_data="settings",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 Yangilash",
+                callback_data="reload",
+            ),
+            InlineKeyboardButton(
+                "ℹ️ Yordam",
+                callback_data="help",
+            ),
+        ],
+    ]
 
-    db.commit()
+    return InlineKeyboardMarkup(keyboard)
 
 
-# =========================================================
-# SAVE EPISODE
-# =========================================================
+def back_keyboard() -> InlineKeyboardMarkup:
 
-def save_episode(
-    series_id,
-    info,
-    media,
-    filename,
-    file_unique_id,
-    file_id,
-    sha256,
-    topic_id,
-    message_id,
-):
-
-    db.execute(
-        """
-        INSERT OR IGNORE INTO seasons (
-            series_id,
-            season_number
-        )
-        VALUES (?, ?)
-        """,
-        (
-            series_id,
-            info["season"],
-        ),
-    )
-
-    db.execute(
-        """
-        INSERT INTO episodes (
-            series_id,
-            season_number,
-            episode_number,
-            episode_title,
-            quality,
-            audio,
-            video_codec,
-            format,
-            filename,
-            file_unique_id,
-            file_id,
-            sha256,
-            topic_id,
-            telegram_message_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            series_id,
-            info["season"],
-            info["episode"],
-            info.get("episode_title"),
-            media.get("quality"),
-            info.get("audio")
-            or media.get("audio_codec"),
-            info.get("video_codec")
-            or media.get("video_codec"),
-            info.get("format"),
-            filename,
-            file_unique_id,
-            file_id,
-            sha256,
-            topic_id,
-            message_id,
-        ),
-    )
-
-    db.commit()
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ Orqaga",
+                callback_data="home",
+            )
+        ]
+    ])
 
 
-# =========================================================
-# TELEGRAM MEDIA PROCESSOR
-# =========================================================
+# ============================================================
+# 🏠 START
+# ============================================================
 
-async def process_telegram_media(
+async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -1201,332 +736,31 @@ async def process_telegram_media(
     if not await owner_only(update):
         return
 
-    message = update.effective_message
+    user = update.effective_user
 
-    if not message:
-        return
-
-    media_file = None
-    filename = None
-    file_unique_id = None
-
-    if message.video:
-
-        media_file = message.video
-
-        filename = (
-            message.video.file_name
-            or f"video_{message.video.file_unique_id}.mp4"
-        )
-
-        file_unique_id = (
-            message.video.file_unique_id
-        )
-
-    elif message.document:
-
-        mime = (
-            message.document.mime_type
-            or ""
-        )
-
-        if not mime.startswith("video/"):
-
-            await message.reply_text(
-                "❌ Bu video fayl emas."
-            )
-
-            return
-
-        media_file = message.document
-
-        filename = (
-            message.document.file_name
-            or f"video_{message.document.file_unique_id}"
-        )
-
-        file_unique_id = (
-            message.document.file_unique_id
-        )
-
-    else:
-        return
-
-    status = await message.reply_text(
-        "⏳ Video tekshirilmoqda..."
+    text = (
+        f"🎬 <b>{BOT_NAME}</b>\n\n"
+        f"👋 Salom, <b>{html.escape(user.first_name)}</b>!\n\n"
+        f"🤖 Men kinolar va seriallarni "
+        f"guruhingizga tartibli joylashtiraman.\n\n"
+        f"📥 Fayl yuboring →\n"
+        f"🔎 metadata tekshiriladi →\n"
+        f"📝 caption yaratiladi →\n"
+        f"📂 topic tanlanadi →\n"
+        f"🚀 guruhga yuboriladi.\n\n"
+        f"🔐 <b>Bot faqat siz uchun ishlaydi.</b>"
     )
-
-    temp_path = MEDIA_DIR / (
-        f"temp_{file_unique_id}_{filename}"
-    )
-
-    try:
-
-        telegram_file = await context.bot.get_file(
-            media_file.file_id
-        )
-
-        await telegram_file.download_to_drive(
-            custom_path=str(temp_path)
-        )
-
-        sha256 = calculate_sha256(
-            temp_path
-        )
-
-        # -------------------------------------------------
-        # DUPLICATE
-        # -------------------------------------------------
-
-        duplicate_movie = movie_exists(
-            file_unique_id,
-            sha256,
-        )
-
-        duplicate_episode = episode_exists(
-            file_unique_id,
-            sha256,
-        )
-
-        if duplicate_movie or duplicate_episode:
-
-            await status.edit_text(
-                "⚠️ Bu video bazada allaqachon mavjud."
-            )
-
-            return
-
-        # -------------------------------------------------
-        # FFMPEG
-        # -------------------------------------------------
-
-        probe = await run_ffprobe(
-            str(temp_path)
-        )
-
-        if not probe:
-
-            await status.edit_text(
-                "❌ Video metadata ma'lumotlarini o'qib bo'lmadi."
-            )
-
-            return
-
-        media = extract_media_info(
-            probe
-        )
-
-        width = media.get("width") or 0
-        height = media.get("height") or 0
-
-        if width < MIN_WIDTH or height < MIN_HEIGHT:
-
-            await status.edit_text(
-                "❌ Video 1080p dan past.\n\n"
-                f"Topilgan: {width}x{height}\n"
-                "Minimal talab: 1920x1080"
-            )
-
-            return
-
-        media["quality"] = detect_quality(
-            width,
-            height,
-        )
-
-        info = parse_filename(
-            filename
-        )
-
-        # -------------------------------------------------
-        # SERIES
-        # -------------------------------------------------
-
-        if (
-            info["season"] is not None
-            and info["episode"] is not None
-        ):
-
-            series_id = create_series(
-                info["title"],
-                info["year"],
-            )
-
-            topic_id = await get_or_create_series_topic(
-                context,
-                series_id,
-                info["title"],
-                info["year"],
-            )
-
-            caption = build_episode_caption(
-                info,
-                media,
-            )
-
-            sent = await context.bot.send_document(
-                chat_id=GROUP_ID,
-                document=media_file.file_id,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                message_thread_id=topic_id,
-            )
-
-            save_episode(
-                series_id,
-                info,
-                media,
-                filename,
-                file_unique_id,
-                media_file.file_id,
-                sha256,
-                topic_id,
-                sent.message_id,
-            )
-
-        # -------------------------------------------------
-        # MOVIE
-        # -------------------------------------------------
-
-        else:
-
-            cursor = db.execute(
-                """
-                INSERT INTO movies (
-                    title,
-                    year,
-                    quality,
-                    audio,
-                    video_codec,
-                    format,
-                    filename,
-                    file_unique_id,
-                    file_id,
-                    sha256
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    info["title"],
-                    info["year"],
-                    media["quality"],
-                    info.get("audio")
-                    or media.get("audio_codec"),
-                    info.get("video_codec")
-                    or media.get("video_codec"),
-                    info.get("format"),
-                    filename,
-                    file_unique_id,
-                    media_file.file_id,
-                    sha256,
-                ),
-            )
-
-            movie_id = cursor.lastrowid
-
-            db.commit()
-
-            topic_id = await get_or_create_movie_topic(
-                context,
-                movie_id,
-                info["title"],
-                info["year"],
-            )
-
-            caption = build_movie_caption(
-                info,
-                media,
-            )
-
-            if (
-                info["format"]
-                and info["format"].lower() == "mp4"
-            ):
-
-                sent = await context.bot.send_video(
-                    chat_id=GROUP_ID,
-                    video=media_file.file_id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    message_thread_id=topic_id,
-                    supports_streaming=True,
-                )
-
-            else:
-
-                sent = await context.bot.send_document(
-                    chat_id=GROUP_ID,
-                    document=media_file.file_id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    message_thread_id=topic_id,
-                )
-
-            db.execute(
-                """
-                UPDATE movies
-                SET topic_id = ?,
-                    telegram_message_id = ?
-                WHERE id = ?
-                """,
-                (
-                    topic_id,
-                    sent.message_id,
-                    movie_id,
-                ),
-            )
-
-            db.commit()
-
-        await status.edit_text(
-            "✅ Video muvaffaqiyatli guruhga joylandi."
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "Media processing error: %s",
-            exc,
-        )
-
-        await status.edit_text(
-            f"❌ Xatolik:\n{html.escape(str(exc))}",
-            parse_mode=ParseMode.HTML,
-        )
-
-    finally:
-
-        try:
-
-            if temp_path.exists():
-                temp_path.unlink()
-
-        except Exception:
-            pass
-
-
-# =========================================================
-# COMMANDS
-# =========================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not await owner_only(update):
-        return
 
     await update.message.reply_text(
-        "🎬 <b>Kino Yordamchi Bot</b>\n\n"
-        "Video yuboring — bot avtomatik tekshiradi,\n"
-        "caption yaratadi va guruhga joylaydi.\n\n"
-        "/help — yordam\n"
-        "/status — bot holati\n"
-        "/list — bazadagi filmlar\n",
+        text,
         parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(),
     )
 
+
+# ============================================================
+# ℹ️ HELP
+# ============================================================
 
 async def help_command(
     update: Update,
@@ -1536,19 +770,38 @@ async def help_command(
     if not await owner_only(update):
         return
 
-    await update.message.reply_text(
-        "🎬 <b>BUYRUQLAR</b>\n\n"
-        "/start — botni ishga tushirish\n"
-        "/help — yordam\n"
-        "/status — bot holati\n"
-        "/list — filmlar ro'yxati\n"
-        "/scan — media papkani tekshirish\n"
-        "/reload — bazani qayta yuklash\n\n"
-        "🎞 Botga video yuborsangiz,\n"
-        "u avtomatik tarzda guruhga joylanadi.",
-        parse_mode=ParseMode.HTML,
+    text = (
+        "🎬 <b>KINO YORDAMCHI — YORDAM</b>\n\n"
+        "📥 <b>Kino yuklash</b>\n"
+        "Botga video yoki video fayl yuboring.\n\n"
+        "📺 <b>Serial</b>\n"
+        "Fayl nomida <code>S01E01</code> yoki "
+        "<code>1x01</code> bo‘lishi kerak.\n\n"
+        "🎞 <b>Sifat</b>\n"
+        "1080p va undan yuqori fayllar qabul qilinadi.\n\n"
+        "📝 <b>Caption</b>\n"
+        "Caption avtomatik yaratiladi.\n\n"
+        "🔐 <b>Admin</b>\n"
+        "Faqat OWNER_ID egasi botdan foydalanishi mumkin."
     )
 
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(),
+        )
+
+
+# ============================================================
+# 📊 STATUS
+# ============================================================
 
 async def status_command(
     update: Update,
@@ -1570,18 +823,166 @@ async def status_command(
         "SELECT COUNT(*) FROM episodes"
     ).fetchone()[0]
 
-    await update.message.reply_text(
-        "📊 <b>BOT STATUS</b>\n\n"
-        f"🎬 Filmlar: <b>{movies}</b>\n"
+    text = (
+        "📊 <b>BOT STATISTIKASI</b>\n\n"
+        f"🎬 Kinolar: <b>{movies}</b>\n"
         f"📺 Seriallar: <b>{series}</b>\n"
         f"🎞 Qismlar: <b>{episodes}</b>\n\n"
-        f"👤 Owner ID: <code>{OWNER_ID}</code>\n"
-        f"👥 Group ID: <code>{GROUP_ID}</code>",
-        parse_mode=ParseMode.HTML,
+        f"🟢 Bot: <b>ONLINE</b>"
     )
 
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(),
+        )
 
-async def list_command(
+
+# ============================================================
+# 🎬 CREATE FORUM TOPIC
+# ============================================================
+
+async def create_topic(
+    bot,
+    title: str,
+) -> Optional[int]:
+
+    try:
+        topic = await bot.create_forum_topic(
+            chat_id=GROUP_ID,
+            name=title[:128],
+        )
+
+        return topic.message_thread_id
+
+    except Exception as e:
+        logger.exception(
+            "Topic yaratishda xato: %s",
+            e,
+        )
+
+        return None
+
+
+# ============================================================
+# 🎬 GET/CREATE MOVIE TOPIC
+# ============================================================
+
+async def get_movie_topic(
+    bot,
+    title: str,
+    year: Optional[int],
+) -> Optional[int]:
+
+    row = db.execute(
+        """
+        SELECT topic_id
+        FROM movies
+        WHERE title = ?
+          AND (
+              year = ?
+              OR (year IS NULL AND ? IS NULL)
+          )
+        AND topic_id IS NOT NULL
+        LIMIT 1
+        """,
+        (title, year, year),
+    ).fetchone()
+
+    if row:
+        return row["topic_id"]
+
+    topic_name = f"🎬 {title}"
+
+    if year:
+        topic_name += f" ({year})"
+
+    topic_id = await create_topic(
+        bot,
+        topic_name,
+    )
+
+    return topic_id
+
+
+# ============================================================
+# 📺 GET/CREATE SERIES
+# ============================================================
+
+async def get_series(
+    bot,
+    title: str,
+    year: Optional[int],
+):
+
+    row = db.execute(
+        """
+        SELECT *
+        FROM series
+        WHERE title = ?
+          AND (
+              year = ?
+              OR (year IS NULL AND ? IS NULL)
+          )
+        LIMIT 1
+        """,
+        (title, year, year),
+    ).fetchone()
+
+    if row:
+        return dict(row)
+
+    topic_name = f"📺 {title}"
+
+    if year:
+        topic_name += f" ({year})"
+
+    topic_id = await create_topic(
+        bot,
+        topic_name,
+    )
+
+    cursor = db.execute(
+        """
+        INSERT INTO series
+        (
+            title,
+            year,
+            topic_id
+        )
+        VALUES (?, ?, ?)
+        """,
+        (
+            title,
+            year,
+            topic_id,
+        ),
+    )
+
+    db.commit()
+
+    series_id = cursor.lastrowid
+
+    return {
+        "id": series_id,
+        "title": title,
+        "year": year,
+        "topic_id": topic_id,
+    }
+
+
+# ============================================================
+# 📥 PROCESS VIDEO
+# ============================================================
+
+async def process_video(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -1589,9 +990,386 @@ async def list_command(
     if not await owner_only(update):
         return
 
+    message = update.message
+
+    if not message:
+        return
+
+    media = message.video or message.document
+
+    if not media:
+        return
+
+    filename = (
+        getattr(media, "file_name", None)
+        or f"media_{message.message_id}.mp4"
+    )
+
+    await message.reply_text(
+        "🔎 <b>Fayl tekshirilmoqda...</b>\n\n"
+        "⏳ Metadata o‘qilmoqda...",
+        parse_mode=ParseMode.HTML,
+    )
+
+    temp_path = None
+
+    try:
+
+        telegram_file = await media.get_file()
+
+        suffix = Path(filename).suffix or ".mp4"
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=suffix,
+        ) as temp:
+
+            temp_path = temp.name
+
+        await telegram_file.download_to_drive(
+            custom_path=temp_path
+        )
+
+        # ----------------------------------------------------
+        # SHA256
+        # ----------------------------------------------------
+
+        sha256 = hashlib.sha256()
+
+        with open(temp_path, "rb") as f:
+
+            while True:
+
+                chunk = f.read(1024 * 1024)
+
+                if not chunk:
+                    break
+
+                sha256.update(chunk)
+
+        sha256_value = sha256.hexdigest()
+
+        # ----------------------------------------------------
+        # Duplicate check
+        # ----------------------------------------------------
+
+        duplicate = db.execute(
+            """
+            SELECT id
+            FROM movies
+            WHERE sha256 = ?
+
+            UNION
+
+            SELECT id
+            FROM episodes
+            WHERE sha256 = ?
+
+            LIMIT 1
+            """,
+            (
+                sha256_value,
+                sha256_value,
+            ),
+        ).fetchone()
+
+        if duplicate:
+
+            await message.reply_text(
+                "⚠️ <b>Bu fayl allaqachon bazada mavjud.</b>",
+                parse_mode=ParseMode.HTML,
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # FFPROBE
+        # ----------------------------------------------------
+
+        probe = await run_ffprobe(
+            temp_path
+        )
+
+        if not probe:
+
+            await message.reply_text(
+                "❌ <b>Video metadata o‘qilmadi.</b>\n"
+                "FFmpeg/ffprobe tekshiring.",
+                parse_mode=ParseMode.HTML,
+            )
+
+            return
+
+        metadata = extract_video_metadata(
+            probe
+        )
+
+        width = metadata["width"]
+        height = metadata["height"]
+
+        if width < MIN_WIDTH or height < MIN_HEIGHT:
+
+            await message.reply_text(
+                "❌ <b>Video sifati yetarli emas.</b>\n\n"
+                f"📐 Resolution: "
+                f"<code>{width}x{height}</code>\n"
+                "✅ Minimum: <b>1920x1080</b>",
+                parse_mode=ParseMode.HTML,
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Parse filename
+        # ----------------------------------------------------
+
+        info = parse_filename(
+            filename
+        )
+
+        # actual codec
+        if metadata["video_codec"]:
+            info["video_codec"] = (
+                metadata["video_codec"]
+            )
+
+        # ----------------------------------------------------
+        # MOVIE
+        # ----------------------------------------------------
+
+        if info["type"] == "movie":
+
+            title = info["title"]
+            year = info["year"]
+
+            topic_id = await get_movie_topic(
+                context.bot,
+                title,
+                year,
+            )
+
+            if not topic_id:
+
+                await message.reply_text(
+                    "❌ Topic yaratilmadi.",
+                )
+
+                return
+
+            caption = build_movie_caption(
+                info,
+                metadata,
+            )
+
+            # save DB first
+            cursor = db.execute(
+                """
+                INSERT INTO movies
+                (
+                    title,
+                    year,
+                    quality,
+                    audio,
+                    video_codec,
+                    container,
+                    file_name,
+                    file_id,
+                    file_unique_id,
+                    sha256,
+                    topic_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    title,
+                    year,
+                    quality_from_resolution(
+                        width,
+                        height,
+                    ),
+                    info.get("audio")
+                    or metadata.get("audio_codec"),
+                    metadata.get("video_codec"),
+                    info.get("container"),
+                    filename,
+                    getattr(media, "file_id", None),
+                    getattr(media, "file_unique_id", None),
+                    sha256_value,
+                    topic_id,
+                ),
+            )
+
+            db.commit()
+
+            # ------------------------------------------------
+            # Send to group
+            # ------------------------------------------------
+
+            await context.bot.send_video(
+                chat_id=GROUP_ID,
+                video=media.file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                message_thread_id=topic_id,
+                supports_streaming=True,
+            )
+
+            await message.reply_text(
+                "✅ <b>Kino guruhga joylandi!</b>\n\n"
+                f"🎬 {html.escape(title)}\n"
+                f"📅 {year or '—'}\n"
+                f"🎞 {quality_from_resolution(width, height)}",
+                parse_mode=ParseMode.HTML,
+            )
+
+        # ----------------------------------------------------
+        # SERIES
+        # ----------------------------------------------------
+
+        else:
+
+            title = info["title"]
+            year = info["year"]
+
+            series = await get_series(
+                context.bot,
+                title,
+                year,
+            )
+
+            series_id = series["id"]
+            topic_id = series["topic_id"]
+
+            caption = build_episode_caption(
+                info,
+                metadata,
+            )
+
+            # season
+            db.execute(
+                """
+                INSERT OR IGNORE INTO seasons
+                (
+                    series_id,
+                    season
+                )
+                VALUES (?, ?)
+                """,
+                (
+                    series_id,
+                    info["season"],
+                ),
+            )
+
+            # episode
+            db.execute(
+                """
+                INSERT INTO episodes
+                (
+                    series_id,
+                    season,
+                    episode,
+                    episode_title,
+                    quality,
+                    audio,
+                    video_codec,
+                    container,
+                    file_name,
+                    file_id,
+                    file_unique_id,
+                    sha256,
+                    topic_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    series_id,
+                    info["season"],
+                    info["episode"],
+                    info.get("episode_title"),
+                    quality_from_resolution(
+                        width,
+                        height,
+                    ),
+                    info.get("audio")
+                    or metadata.get("audio_codec"),
+                    metadata.get("video_codec"),
+                    info.get("container"),
+                    filename,
+                    getattr(media, "file_id", None),
+                    getattr(media, "file_unique_id", None),
+                    sha256_value,
+                    topic_id,
+                ),
+            )
+
+            db.commit()
+
+            await context.bot.send_video(
+                chat_id=GROUP_ID,
+                video=media.file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                message_thread_id=topic_id,
+                supports_streaming=True,
+            )
+
+            await message.reply_text(
+                "✅ <b>Serial qismi guruhga joylandi!</b>\n\n"
+                f"📺 {html.escape(title)}\n"
+                f"📂 S{info['season']:02d}\n"
+                f"🎬 E{info['episode']:02d}\n"
+                f"🎞 {quality_from_resolution(width, height)}",
+                parse_mode=ParseMode.HTML,
+            )
+
+    except Exception as e:
+
+        logger.exception(
+            "Video processing error: %s",
+            e,
+        )
+
+        await message.reply_text(
+            "❌ <b>Xatolik yuz berdi.</b>\n\n"
+            f"<code>{html.escape(str(e)[:1000])}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+    finally:
+
+        if temp_path:
+
+            try:
+                os.remove(temp_path)
+
+            except OSError:
+                pass
+
+
+# ============================================================
+# 🎬 MOVIE LIST
+# ============================================================
+
+async def movies_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    if not is_owner(query.from_user.id):
+
+        await query.answer(
+            "⛔ Ruxsat yo‘q!",
+            show_alert=True,
+        )
+
+        return
+
     rows = db.execute(
         """
-        SELECT title, year, quality, filename
+        SELECT title, year
         FROM movies
         ORDER BY id DESC
         LIMIT 20
@@ -1600,95 +1378,288 @@ async def list_command(
 
     if not rows:
 
-        await update.message.reply_text(
-            "📭 Bazada kino yo'q."
+        text = (
+            "🎬 <b>KINOLAR</b>\n\n"
+            "Hozircha kino mavjud emas."
         )
 
-        return
+    else:
 
-    text = "🎬 <b>OXIRGI FILMLAR</b>\n\n"
+        lines = [
+            "🎬 <b>SO‘NGGI KINOLAR</b>\n"
+        ]
 
-    for index, row in enumerate(
-        rows,
-        1,
-    ):
+        for index, row in enumerate(
+            rows,
+            start=1,
+        ):
 
-        year = (
-            f" ({row['year']})"
-            if row["year"]
-            else ""
-        )
+            year = (
+                f" ({row['year']})"
+                if row["year"]
+                else ""
+            )
 
-        text += (
-            f"{index}. "
-            f"<b>{html.escape(row['title'])}</b>"
-            f"{year}\n"
-            f"🎞 {html.escape(row['quality'] or 'N/A')}\n"
-        )
+            lines.append(
+                f"{index}. 🎬 "
+                f"{html.escape(row['title'])}"
+                f"{year}"
+            )
 
-    await update.message.reply_text(
+        text = "\n".join(lines)
+
+    await query.edit_message_text(
         text,
         parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
     )
 
 
-async def scan_command(
+# ============================================================
+# 📺 SERIES LIST
+# ============================================================
+
+async def series_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    if not await owner_only(update):
+    query = update.callback_query
+
+    if not is_owner(query.from_user.id):
+
+        await query.answer(
+            "⛔ Ruxsat yo‘q!",
+            show_alert=True,
+        )
+
         return
 
-    files = []
+    rows = db.execute(
+        """
+        SELECT title, year
+        FROM series
+        ORDER BY id DESC
+        LIMIT 20
+        """
+    ).fetchall()
 
-    for path in MEDIA_DIR.rglob("*"):
+    if not rows:
 
-        if path.is_file():
+        text = (
+            "📺 <b>SERIALLAR</b>\n\n"
+            "Hozircha serial mavjud emas."
+        )
 
-            if path.suffix.lower() in (
-                ".mp4",
-                ".mkv",
-                ".avi",
-                ".mov",
-                ".webm",
-            ):
+    else:
 
-                files.append(path)
+        lines = [
+            "📺 <b>SO‘NGGI SERIALLAR</b>\n"
+        ]
 
-    await update.message.reply_text(
-        f"📁 Media papkada <b>{len(files)}</b> ta video topildi.",
+        for index, row in enumerate(
+            rows,
+            start=1,
+        ):
+
+            year = (
+                f" ({row['year']})"
+                if row["year"]
+                else ""
+            )
+
+            lines.append(
+                f"{index}. 📺 "
+                f"{html.escape(row['title'])}"
+                f"{year}"
+            )
+
+        text = "\n".join(lines)
+
+    await query.edit_message_text(
+        text,
         parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
     )
 
 
-async def reload_command(
+# ============================================================
+# ⚙️ SETTINGS
+# ============================================================
+
+async def settings_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    if not await owner_only(update):
+    query = update.callback_query
+
+    if not is_owner(query.from_user.id):
+
+        await query.answer(
+            "⛔ Ruxsat yo‘q!",
+            show_alert=True,
+        )
+
         return
 
-    db.commit()
+    text = (
+        "⚙️ <b>BOT SOZLAMALARI</b>\n\n"
+        f"🎬 Bot: <b>{BOT_NAME}</b>\n"
+        f"📐 Minimum sifat: <b>1080p</b>\n"
+        f"🔐 Owner ID: <code>{OWNER_ID}</code>\n"
+        f"👥 Group ID: <code>{GROUP_ID}</code>\n"
+        f"🗄 Database: <code>{DB_PATH}</code>\n\n"
+        "🟢 Polling: faol\n"
+        "🟢 SQLite: faol\n"
+        "🟢 FFprobe: faol"
+    )
 
-    await update.message.reply_text(
-        "♻️ Database qayta yuklandi."
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
     )
 
 
-# =========================================================
-# HEALTH SERVER
-# =========================================================
+# ============================================================
+# 🔄 RELOAD
+# ============================================================
 
-async def health(
-    request
+async def reload_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    if not is_owner(query.from_user.id):
+
+        await query.answer(
+            "⛔ Ruxsat yo‘q!",
+            show_alert=True,
+        )
+
+        return
+
+    await query.answer(
+        "🔄 Yangilanmoqda..."
+    )
+
+    await query.edit_message_text(
+        "🔄 <b>Bot ma'lumotlari yangilandi.</b>\n\n"
+        "🟢 Database tekshirildi.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
+    )
+
+
+# ============================================================
+# 🏠 HOME CALLBACK
+# ============================================================
+
+async def home_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    if not is_owner(query.from_user.id):
+
+        await query.answer(
+            "⛔ Ruxsat yo‘q!",
+            show_alert=True,
+        )
+
+        return
+
+    text = (
+        f"🎬 <b>{BOT_NAME}</b>\n\n"
+        "🤖 Boshqaruv paneli\n\n"
+        "📥 Kino/serial yuboring.\n"
+        "📝 Caption avtomatik yaratiladi.\n"
+        "📂 Topic avtomatik tanlanadi."
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(),
+    )
+
+
+# ============================================================
+# 🔘 CALLBACK ROUTER
+# ============================================================
+
+async def callback_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    data = query.data
+
+    if data == "home":
+        await home_callback(
+            update,
+            context,
+        )
+
+    elif data == "movies":
+        await movies_callback(
+            update,
+            context,
+        )
+
+    elif data == "series":
+        await series_callback(
+            update,
+            context,
+        )
+
+    elif data == "status":
+        await status_command(
+            update,
+            context,
+        )
+
+    elif data == "settings":
+        await settings_callback(
+            update,
+            context,
+        )
+
+    elif data == "help":
+        await help_command(
+            update,
+            context,
+        )
+
+    elif data == "reload":
+        await reload_callback(
+            update,
+            context,
+        )
+
+
+# ============================================================
+# ❤️ HEALTH SERVER
+# ============================================================
+
+async def health_handler(
+    request: web.Request,
 ):
 
     return web.json_response(
         {
             "status": "ok",
             "bot": "Kino Yordamchi",
+            "service": "online",
         }
     )
 
@@ -1699,17 +1670,15 @@ async def start_health_server():
 
     app.router.add_get(
         "/",
-        health,
+        health_handler,
     )
 
     app.router.add_get(
         "/health",
-        health,
+        health_handler,
     )
 
-    runner = web.AppRunner(
-        app
-    )
+    runner = web.AppRunner(app)
 
     await runner.setup()
 
@@ -1729,11 +1698,11 @@ async def start_health_server():
     return runner
 
 
-# =========================================================
-# TELEGRAM APPLICATION
-# =========================================================
+# ============================================================
+# 🧩 BUILD APPLICATION
+# ============================================================
 
-def build_application():
+def build_application() -> Application:
 
     application = (
         Application
@@ -1742,10 +1711,11 @@ def build_application():
         .build()
     )
 
+    # Commands
     application.add_handler(
         CommandHandler(
             "start",
-            start,
+            start_command,
         )
     )
 
@@ -1763,87 +1733,116 @@ def build_application():
         )
     )
 
+    # Inline buttons
     application.add_handler(
-        CommandHandler(
-            "list",
-            list_command,
+        CallbackQueryHandler(
+            callback_router
         )
     )
 
-    application.add_handler(
-        CommandHandler(
-            "scan",
-            scan_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "reload",
-            reload_command,
-        )
-    )
-
+    # Video
     application.add_handler(
         MessageHandler(
-            filters.VIDEO
-            | filters.Document.VIDEO,
-            process_telegram_media,
+            filters.VIDEO,
+            process_video,
+        )
+    )
+
+    # Documents
+    application.add_handler(
+        MessageHandler(
+            filters.Document.VIDEO,
+            process_video,
         )
     )
 
     return application
 
 
-# =========================================================
-# MAIN
-# =========================================================
+# ============================================================
+# 🚀 MAIN
+# ============================================================
 
 async def main():
 
-    validate_config()
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+
+    if not BOT_TOKEN:
+
+        raise RuntimeError(
+            "BOT_TOKEN Environment Variable topilmadi."
+        )
+
+    if OWNER_ID == 0:
+
+        raise RuntimeError(
+            "OWNER_ID Environment Variable noto‘g‘ri."
+        )
+
+    if GROUP_ID == 0:
+
+        raise RuntimeError(
+            "GROUP_ID Environment Variable noto‘g‘ri."
+        )
+
+    # --------------------------------------------------------
+    # Database
+    # --------------------------------------------------------
 
     init_database()
 
+    # --------------------------------------------------------
+    # Application
+    # --------------------------------------------------------
+
     application = build_application()
 
-    health_runner = None
+    logger.info(
+        "Initializing Telegram application..."
+    )
+
+    await application.initialize()
+
+    # --------------------------------------------------------
+    # Telegram bot
+    # --------------------------------------------------------
+
+    await application.start()
+
+    if application.updater is None:
+
+        raise RuntimeError(
+            "Telegram updater mavjud emas."
+        )
+
+    logger.info(
+        "Starting Telegram polling..."
+    )
+
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
+
+    # --------------------------------------------------------
+    # Health server
+    # --------------------------------------------------------
+
+    health_runner = await start_health_server()
+
+    logger.info(
+        "🎬 Kino Yordamchi ONLINE"
+    )
 
     try:
 
-        logger.info(
-            "Initializing Telegram application..."
-        )
+        await asyncio.Event().wait()
 
-        await application.initialize()
-
-        await application.start()
-
-        if application.updater is None:
-
-            raise RuntimeError(
-                "Telegram updater mavjud emas."
-            )
-
-        await application.updater.start_polling(
-            allowed_updates=Update.ALL_TYPES
-        )
-
-        logger.info(
-            "Telegram bot polling started."
-        )
-
-        health_runner = await start_health_server()
-
-        logger.info(
-            "Kino Yordamchi Bot ishga tushdi."
-        )
-
-        stop_event = asyncio.Event()
-
-        await stop_event.wait()
-
-    except (KeyboardInterrupt, SystemExit):
+    except (
+        KeyboardInterrupt,
+        SystemExit,
+    ):
 
         logger.info(
             "Shutdown requested."
@@ -1852,34 +1851,73 @@ async def main():
     finally:
 
         logger.info(
-            "Bot to'xtatilmoqda..."
+            "Stopping bot..."
         )
 
-        if application.updater:
+        try:
 
-            if application.updater.running:
+            if (
+                application.updater
+                and application.updater.running
+            ):
 
                 await application.updater.stop()
 
-        if application.running:
+        except Exception:
 
-            await application.stop()
+            logger.exception(
+                "Updater stop error"
+            )
 
-        await application.shutdown()
+        try:
 
-        if health_runner:
+            if application.running:
+
+                await application.stop()
+
+        except Exception:
+
+            logger.exception(
+                "Application stop error"
+            )
+
+        try:
+
+            await application.shutdown()
+
+        except Exception:
+
+            logger.exception(
+                "Application shutdown error"
+            )
+
+        try:
 
             await health_runner.cleanup()
 
-        db.close()
+        except Exception:
+
+            logger.exception(
+                "Health server cleanup error"
+            )
+
+        try:
+
+            db.close()
+
+        except Exception:
+
+            pass
 
         logger.info(
-            "Bot to'xtatildi."
+            "🎬 Kino Yordamchi stopped."
         )
 
 
+# ============================================================
+# START
+# ============================================================
+
 if __name__ == "__main__":
 
-    asyncio.run(
-        main()
-    )
+    asyncio.run(main())
