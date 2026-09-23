@@ -41,19 +41,29 @@ BOT_TOKEN = os.getenv("8998476657:AAFlqY444CFw5IsVCoAgavHajLasZsRkX_c", "").stri
 
 try:
     OWNER_ID = int(os.getenv("6975146118", "0").strip())
-except ValueError:
+except (TypeError, ValueError):
     OWNER_ID = 0
 
 try:
     GROUP_ID = int(os.getenv("-1003535011408", "0").strip())
-except ValueError:
+except (TypeError, ValueError):
     GROUP_ID = 0
 
-SERVER_MEDIA_DIR = "./media"
-DATABASE_FILE = "./media_manager.db"
-TEMP_DIR = "./temp"
-CHANNEL_USERNAME = os.getenv("https://t.me/+UvkuWW91FsdhNDQy", "").strip()
-PORT = int(os.getenv("PORT", "10000"))
+SERVER_MEDIA_DIR = os.getenv("SERVER_MEDIA_DIR", "./media").strip() or "./media"
+DATABASE_FILE = os.getenv("DATABASE_FILE", "./media_manager.db").strip() or "./media_manager.db"
+TEMP_DIR = os.getenv("TEMP_DIR", "./temp").strip() or "./temp"
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()
+
+try:
+    PORT = int(os.getenv("PORT", "10000").strip())
+except (TypeError, ValueError):
+    PORT = 10000
+
+DELETE_SOURCE_AFTER_COPY = False
+
+MIN_WIDTH = 1920
+MIN_HEIGHT = 1080
+
 
 DELETE_SOURCE_AFTER_COPY = False
 
@@ -217,12 +227,21 @@ def db_execute(query: str, params=(), fetchone=False, fetchall=False):
 
 def validate_config():
     missing = []
+
     if not BOT_TOKEN:
         missing.append("BOT_TOKEN")
     if OWNER_ID <= 0:
         missing.append("OWNER_ID")
     if GROUP_ID == 0:
         missing.append("GROUP_ID")
+
+    logger.info(
+        "CONFIG CHECK: BOT_TOKEN=%s | OWNER_ID=%s | GROUP_ID=%s | PORT=%s",
+        "SET" if BOT_TOKEN else "EMPTY",
+        "SET" if OWNER_ID > 0 else "EMPTY",
+        "SET" if GROUP_ID != 0 else "EMPTY",
+        PORT,
+    )
 
     if missing:
         raise RuntimeError(
@@ -232,6 +251,7 @@ def validate_config():
 
     Path(SERVER_MEDIA_DIR).mkdir(parents=True, exist_ok=True)
     Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
+
 
 
 # ============================================================
@@ -951,6 +971,66 @@ async def main():
     init_database()
 
     application = build_application()
+    await application.initialize()
+    await application.start()
+
+    if application.updater is None:
+        raise RuntimeError("Telegram updater mavjud emas.")
+
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
+
+    health_runner = await start_health_server()
+
+    logger.info("Kino Yordamchi ONLINE.")
+    logger.info("Telegram polling started successfully.")
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        logger.info("Bot stopping...")
+
+        if application.updater and application.updater.running:
+            await application.updater.stop()
+
+        if application.running:
+            await application.stop()
+
+        await application.shutdown()
+        await health_runner.cleanup()
+
+
+
+async def health_handler(request: web.Request) -> web.Response:
+    return web.json_response({
+        "status": "ok",
+        "service": "kino-yordamchi",
+        "telegram": "polling",
+    })
+
+
+async def start_health_server() -> web.AppRunner:
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info("Health server started on 0.0.0.0:%s", PORT)
+    return runner
+
+
+async def main():
+    validate_config()
+    init_database()
+
+    application = build_application()
+
     await application.initialize()
     await application.start()
 
