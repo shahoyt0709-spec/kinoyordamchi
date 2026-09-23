@@ -229,11 +229,11 @@ def validate_config():
     missing = []
 
     if not BOT_TOKEN:
-        missing.append("BOT_TOKEN")
+        missing.append("8998476657:AAFlqY444CFw5IsVCoAgavHajLasZsRkX_c")
     if OWNER_ID <= 0:
-        missing.append("OWNER_ID")
+        missing.append("6975146118")
     if GROUP_ID == 0:
-        missing.append("GROUP_ID")
+        missing.append("-1003535011408")
 
     logger.info(
         "CONFIG CHECK: BOT_TOKEN=%s | OWNER_ID=%s | GROUP_ID=%s | PORT=%s",
